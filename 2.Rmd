@@ -1,0 +1,1237 @@
+---
+title: "SP50"
+author: "GUO JIAWEI"
+date: "2025-12-29"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Load Packages
+
+```{r}
+# Load Package
+library(quantmod)
+library(tseries)
+library(forecast)
+library(Metrics)
+library(dplyr)
+library(keras)
+library(tensorflow)
+library(TSA)
+library(rugarch)
+```
+
+# Load Data
+
+```{r}
+#data=read.table("d-sp55008.txt",header=T)
+data=read.table("d-sp58010.txt",header=T)
+print(data)
+```
+
+```{r}
+data_ts <- ts(data$Close)
+cat("数据长度:", length(data_ts), "个月\n")
+print(summary(data_ts))
+```
+
+# 时序图
+
+```{r}
+# 绘制原始数据时序图
+#par(mfrow=c(1,2))
+plot(data_ts, main="Time Series Diagram: Raw Data", ylab="Closing Price", xlab="Time",
+     col="blue", lwd=2)
+grid()
+
+# 对数变换（稳定方差）
+log_data <- log(data_ts)
+plot(log_data, main="Time Series Diagram: After Log Transformation", ylab="ln(Closing Price)", xlab="Time",
+     col="darkgreen", lwd=2)
+grid()
+```
+
+观察原序列图像及对数处理图像可以发现，对数处理可以在一定程度上缓解方差波动的问题。但序列仍存在明显的增长性，可以通过对序列进行分解直观观察。
+
+```{r}
+acf(data_ts, main="ACF: Raw Data", lag.max=20)
+acf(log_data, main="ACF: After Log Transformation", lag.max=20)
+```
+
+```{r}
+# 原始数据的ADF检验
+library(fUnitRoots)
+cat("原始数据ADF检验:\n")
+fUnitRoots::adfTest(data_ts)
+```
+
+```{r}
+# 对数数据的ADF检验
+adf_log <- fUnitRoots::adfTest(log_data)
+cat("\n对数数据ADF检验:\n")
+print(adf_log)
+```
+
+一方面,原始数据和对数数据对应的自相关函数见上图。不管是对于原始数据还是对数数据,自相关函数都接近1，说明该过程具有长记忆性，从而不具有平稳性;另外一方面,对原始数据和对数数据进行ADF检验,得到的p值分别为0.9724和0.99,故认为原始数据和对数数据是不平稳的. 为了处理不平稳的数据,可以采用差分的方法.考虑对对数收盘价进行差分,这通常被称为对数收益率。
+
+```{r}
+# 一阶差分（去除趋势）
+diff_data <- diff(log_data)
+plot(diff_data, main="Time Series Diagram: Log Return", ylab="Log Return", xlab="Time",
+     col="black", lwd=2)
+grid()
+abline(h=0, lty=2)#
+```
+
+对对数收益率进行ADF检验,所得的p值为0.01, 说明一次差分即可得到平稳的数据.
+
+```{r}
+# 差分后数据的ADF检验
+adf_diff <- fUnitRoots::adfTest(diff_data)
+cat("\n一阶差分后数据ADF检验:\n")
+print(adf_diff)
+```
+
+```{r}
+tsdisplay(diff_data, main="Log Return")
+acf(diff_data, main="ACF: Log Return", lag.max=20)
+pacf(diff_data, main="PACF: Log Return", lag.max=20)
+
+
+```
+
+在建立MA模型时,我们可以使用自相关函数(ACF)的图像来估计阶数;相应地,在建立AR模型时,我们可以使用偏自相关函数(PACF)的图像来估计阶数;对于ARMA模型而言, 使用ACF和PACF都难以解决问题,但可以用推广的自相关系数(EACF)来估计阶数.
+
+```{r}
+n <- length(diff_data)
+train_size <- floor(0.8 * n)
+test_size <- n - train_size
+
+train_data <- diff_data[1:train_size]
+test_data <- diff_data[(train_size+1):n]
+
+cat("总样本数:", n, "\n")
+cat("训练集:", train_size, "个观测\n")
+cat("测试集:", test_size, "个观测\n\n")
+```
+
+ACF图和PACF图都没有明显的截尾和拖尾特征，对AR()和MA()的之后阶数不好判断，可以使用函数自动寻找最优模型。这里分别使用AIC和BIC准则进行寻找。
+
+# AR
+
+```{r}
+# 使用AIC自动定阶
+ar_order <- ar(train_data, method="mle")
+cat("AIC自动选择的AR阶数:", ar_order$order, "\n\n")
+
+# 拟合AR模型
+ar_model <- arima(train_data, order=c(ar_order$order, 0, 0), include.mean=TRUE)
+
+cat("AR模型估计结果:\n")
+print(ar_model)
+coefs <- ar_model$coef
+se <- sqrt(diag(ar_model$var.coef))
+t_values <- coefs / se # t-value
+p_values <- 2 * (1 - pnorm(abs(t_values))) # p-value
+result <- data.frame(
+  Estimate = coefs,
+  StdError = se,
+  t_value = t_values,
+  p_value = p_values)
+print(result)
+
+```
+
+```{r}
+summary(ar_model)
+```
+
+```{r}
+# AR模型诊断
+cat("\n--- AR模型残差诊断 ---\n")
+par(mfrow=c(2,2))
+checkresiduals(ar_model, main="AR模型残差诊断")
+# ✓ 残差为白噪声 (p-value > 0.05)
+
+```
+
+```{r}
+plot(ar_model $ residuals, xlab = "t", ylab = "residuals") #残差图像
+tsdiag(ar_model, gof.lag = 20) #残差的检验
+qqnorm(ar_model $ residuals,main="QQ Plot: Residuals of AR(4) Model") #残差的QQ图
+qqline(ar_model $ residuals)
+Box.test(ar_model $ residuals, type = "Ljung-Box") #残差的LB检验
+```
+
+```{r}
+# =======================================================
+# 1. AR 模型预测与绘图
+# =======================================================
+# 绘制未来 100 步的预测图
+plot(forecast(ar_model, 100), main = "AR Model Forecast (100 steps)")
+
+# 生成与测试集长度一致的预测数据
+ar_forecast <- forecast(ar_model, h=test_size)
+ar_pred <- as.numeric(ar_forecast$mean)
+
+# =======================================================
+# 2. 计算误差指标
+# =======================================================
+
+# --- A. 样本内误差 (In-Sample Metrics) ---
+# 直接从模型对象中提取 AIC
+aic_ar <- AIC(ar_model)
+
+# --- B. 样本外误差 (Out-of-Sample Metrics) ---
+# MSE (均方误差)
+mse_ar <- mean((test_data - ar_pred)^2)
+
+# RMSE (均方根误差)
+rmse_ar <- sqrt(mse_ar)
+
+# MAE (平均绝对误差)
+mae_ar <- mean(abs(test_data - ar_pred))
+
+# MAPE (平均绝对百分比误差)
+# 注意：收益率数据可能包含 0，加上 eps (1e-8) 防止除以零错误
+eps <- 1e-8
+mape_ar <- mean(abs((test_data - ar_pred) / (test_data + eps))) * 100
+
+# =======================================================
+# 3. 输出结果
+# =======================================================
+cat("\n============================================\n")
+cat("          AR 模型性能评估结果\n")
+cat("============================================\n")
+
+cat("--- 样本内误差 (模型拟合优度) ---\n")
+cat(sprintf("AIC (赤池信息准则):  %.4f\n", aic_ar))
+
+cat("\n--- 样本外误差 (预测准确度) ---\n")
+cat(sprintf("MSE  (均方误差):     %.9f\n", mse_ar))
+cat(sprintf("RMSE (均方根误差):   %.9f\n", rmse_ar))
+cat(sprintf("MAE  (平均绝对误差): %.9f\n", mae_ar))
+cat(sprintf("MAPE (平均绝对百分比): %.2f%%\n", mape_ar))
+cat("--------------------------------------------\n")
+
+# 提示：对于收益率预测，MAPE 通常会很大，这是数据特性导致的
+if(mape_ar > 100) {
+  cat("注：由于收益率接近 0，MAPE 数值可能非常大，建议重点关注 MSE/MAE。\n")
+}
+```
+
+# AR+GARCH
+
+```{r}
+library(FinTS)
+# ARCH效应与GARCH模型
+FinTS::ArchTest(residuals(ar_model))
+```
+
+```{r}
+spec_ar <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(4, 0), include.mean = TRUE),
+  distribution.model = "std"
+)
+
+# 2. 拟合模型 (使用你的训练集 train_data)
+# 注意：solver='hybrid' 能提高收敛成功率
+fit_ar_garch <- ugarchfit(spec = spec_ar, data = train_data, solver = 'hybrid')
+
+# 3. 输出详细结果
+print(fit_ar_garch)
+
+# --- 关键结果解读指南 ---
+# 1. 查看 "Optimal Parameters": 
+#    - alpha1 (ARCH项) 和 beta1 (GARCH项) 的 P值是否 < 0.05？
+#    - shape (t分布自由度) 是否显著？
+# 2. 查看 "Weighted Ljung-Box Test on Standardized Residuals":
+#    - P-value 是否都 > 0.05？(如果是，说明均值模型合格)
+# 3. 查看 "Weighted Ljung-Box Test on Standardized Squared Residuals":
+#    - P-value 是否都 > 0.05？(如果是，说明GARCH模型合格，波动率解释清楚了)
+```
+
+```{r}
+# =======================================================
+# 1. 生成预测 (Forecasting)
+# =======================================================
+# n.ahead: 预测步长，等于测试集长度
+n_ahead <- length(test_data) 
+
+# 进行滚动预测
+ar_garch_forecast <- ugarchforecast(fit_ar_garch, n.ahead = n_ahead)
+
+# =======================================================
+# 2. 提取预测数据
+# =======================================================
+# fitted() 提取收益率预测值 (均值)
+pred_mean_ar_garch <- as.numeric(fitted(ar_garch_forecast))
+
+# sigma() 提取波动率预测值 (标准差)
+pred_sigma_ar_garch <- as.numeric(sigma(ar_garch_forecast))
+
+# =======================================================
+# 3. 计算误差指标
+# =======================================================
+
+# --- A. 样本内误差 (In-Sample Metrics) ---
+# 注意：AIC/BIC 是从拟合对象(fit_ar_garch)中提取，而不是预测对象
+info_mat <- infocriteria(fit_ar_garch)
+aic_garch <- info_mat[1] # Akaike
+bic_garch <- info_mat[2] # Bayes
+
+# --- B. 样本外误差 (Out-of-Sample Metrics) ---
+# MSE (均方误差)
+mse_garch <- mean((test_data - pred_mean_ar_garch)^2)
+
+# RMSE (均方根误差)
+rmse_garch <- sqrt(mse_garch)
+
+# MAE (平均绝对误差)
+mae_garch <- mean(abs(test_data - pred_mean_ar_garch))
+
+# MAPE (平均绝对百分比误差)
+# 加上 eps 防止除以 0
+eps <- 1e-8 
+mape_garch <- mean(abs((test_data - pred_mean_ar_garch) / (test_data + eps))) * 100
+
+# =======================================================
+# 4. 输出结果
+# =======================================================
+cat("\n============================================\n")
+cat("      AR(4)-GARCH(1,1)  模型性能评估结果\n")
+cat("============================================\n")
+
+cat("--- 样本内误差 (模型拟合优度) ---\n")
+cat(sprintf("AIC (赤池信息准则):  %.4f\n", aic_garch))
+cat(sprintf("BIC (贝叶斯准则):    %.4f\n", bic_garch))
+
+cat("\n--- 样本外误差 (预测准确度) ---\n")
+cat(sprintf("MSE  (均方误差):     %.9f\n", mse_garch))
+cat(sprintf("RMSE (均方根误差):   %.9f\n", rmse_garch))
+cat(sprintf("MAE  (平均绝对误差): %.9f\n", mae_garch))
+cat(sprintf("MAPE (平均绝对百分比): %.2f%%\n", mape_garch))
+cat("--------------------------------------------\n")
+
+# =======================================================
+# 5. 绘制预测图 (类似 AR 模型的风格)
+# =======================================================
+# GARCH 的 rugarch 包自带 plot 方法是交互式的，不方便出报告。
+# 这里我们手动绘制 "真实值 vs 预测均值 + 95%动态置信区间"
+# -------------------------------------------------------
+
+# 设定绘图范围 (Y轴)
+ylim_range <- range(c(test_data, 
+                      pred_mean_ar_garch + 2*pred_sigma_ar_garch, 
+                      pred_mean_ar_garch - 2*pred_sigma_ar_garch))
+
+# 1. 绘制真实测试集数据 (灰色线)
+plot(as.numeric(test_data), type = "l", col = "gray", lwd = 1.5,
+     ylim = ylim_range,
+     main = "AR-GARCH Forecast vs Actual (with Dynamic 95% CI)",
+     ylab = "Log Returns", xlab = "Time (Test Set)")
+
+# 2. 绘制 95% 置信区间 (虚线)
+# 上界
+lines(pred_mean_ar_garch + 2 * pred_sigma_ar_garch, col = "blue", lty = 2)
+# 下界
+lines(pred_mean_ar_garch - 2 * pred_sigma_ar_garch, col = "blue", lty = 2)
+
+# 3. 绘制预测均值 (红色实线)
+lines(pred_mean_ar_garch, col = "red", lwd = 2)
+
+# 4. 添加图例
+legend("topleft", 
+       legend = c("Actual Data", "Forecast Mean", "95% Interval (Dynamic)"),
+       col = c("gray", "red", "blue"), 
+       lty = c(1, 1, 2), 
+       lwd = c(1.5, 2, 1),
+       cex = 0.8)
+
+# 5. 添加说明
+mtext("Note: Blue dashed lines show GARCH dynamic volatility", side=3, cex=0.8)
+```
+
+```{r}
+# =======================================================
+# 第三步：可视化 (预测值 vs 真实值 + 动态风险区间)
+# =======================================================
+library(ggplot2)
+
+# 1. 整理绘图数据
+plot_df <- data.frame(
+  Time = 1:n_ahead,
+  Actual = as.numeric(test_data),
+  Predicted = pred_mean_ar,
+  # 95% 置信区间 = 均值 +/- 2倍动态标准差
+  # 这体现了 GARCH 的价值：波动大时区间变宽
+  Lower = pred_mean_ar - 2 * pred_sigma_ar,
+  Upper = pred_mean_ar + 2 * pred_sigma_ar
+)
+
+# 2. 为了清晰，只画前 200 个点 (或改为 n_ahead 画全部)
+subset_n <- min(200, n_ahead)
+
+ggplot(plot_df[1:subset_n, ], aes(x = Time)) +
+  # 绘制真实值 (黑色虚线)
+  geom_line(aes(y = Actual, color = "Actual Return"), size = 0.5, alpha = 0.7) +
+  
+  # 绘制预测均值 (红色实线)
+  geom_line(aes(y = Predicted, color = "Predicted Mean"), size = 0.8) +
+  
+  # 绘制 95% 动态置信区间 (灰色阴影)
+  geom_ribbon(aes(ymin = Lower, ymax = Upper, fill = "95% Confidence Interval"), alpha = 0.2) +
+  
+  # 颜色和标签设置
+  scale_color_manual(name = "Legend", values = c("Actual Return" = "black", "Predicted Mean" = "red")) +
+  scale_fill_manual(name = "", values = c("95% Confidence Interval" = "red")) +
+  
+  labs(
+    title = "AR(4)-GARCH(1,1) Forecast with Dynamic Volatility",
+    subtitle = "Notice how the confidence interval (grey area) expands when volatility increases",
+    y = "Log Returns",
+    x = "Time (Test Set Index)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+# =======================================================
+# 1. 准备数据与预测
+# =======================================================
+# 设定预测步数 (比如你图中的 100 步)
+n_ahead <- 100 
+
+# 使用你拟合好的 AR-GARCH 模型进行预测
+# fit_ar_garch 是你上一步用 rugarch 拟合好的模型对象
+fc_garch <- ugarchforecast(fit_ar_garch, n.ahead = n_ahead)
+
+# 提取预测的均值 (Predicted Mean) 和 波动率 (Sigma)
+pred_mean <- as.numeric(fitted(fc_garch))
+pred_sigma <- as.numeric(sigma(fc_garch))
+
+# =======================================================
+# 2. 准备绘图数据 (拼接历史和未来)
+# =======================================================
+# 提取历史数据
+history_data <- as.numeric(train_data) 
+n_history <- length(history_data)
+
+# 生成未来的时间轴索引
+future_index <- (n_history + 1):(n_history + n_ahead)
+
+# 计算 95% 置信区间 (均值 +/- 2倍条件标准差)
+# 这里的"宽度"是由 GARCH 模型算出来的，会随风险变化
+upper_bound <- pred_mean + 2 * pred_sigma
+lower_bound <- pred_mean - 2 * pred_sigma
+
+# =======================================================
+# 3. 开始绘图 (仿照 forecast 包的风格)
+# =======================================================
+# 步骤 A: 画空白框和历史数据
+# xlim 设置为 历史长度 + 预测长度，给后面留出位置
+plot(history_data, type = "l", col = "black", lwd = 1,
+     xlim = c(1, n_history + n_ahead), 
+     main = "Forecasts from AR(4)-GARCH(1,1)",
+     ylab = "Returns", xlab = "Time")
+
+# 步骤 B: 画预测的置信区间 (阴影部分)
+# 使用 polygon 函数绘制半透明的阴影
+# 颜色 rgb(0, 0, 1, 0.3) 代表蓝色，0.3是透明度
+polygon(c(future_index, rev(future_index)), 
+        c(upper_bound, rev(lower_bound)), 
+        col = rgb(0, 0, 1, 0.3), border = NA)
+
+# 步骤 C: 画预测均值线 (中间的蓝线)
+lines(future_index, pred_mean, col = "blue", lwd = 2)
+
+# 添加一条图例
+legend("bottomleft", legend = c("History", "Forecast", "95% Interval"),
+       col = c("black", "blue", rgb(0, 0, 1, 0.3)), 
+       lty = c(1, 1, 1), lwd = c(1, 2, 10))
+```
+
+# ARMA
+
+```{r}
+# 使用auto.arima自动选择最优ARMA模型
+arma_model <- auto.arima(train_data, max.p=10, start.p=10,
+                         max.q=10, start.q=0,
+                         ic="aic", seasonal= FALSE,
+                        trace=TRUE,stepwise=TRUE,approximation = FALSE)
+
+cat("\nARMA模型估计结果:\n")
+print(arma_model)
+coefs <- arma_model$coef
+se <- sqrt(diag(arma_model$var.coef))
+t_values <- coefs / se # t-value
+p_values <- 2 * (1 - pnorm(abs(t_values))) # p-value
+result <- data.frame(
+  Estimate = coefs,
+  StdError = se,
+  t_value = t_values,
+  p_value = p_values)
+print(result)
+
+```
+
+```{r}
+# ARMA模型诊断
+cat("\n--- ARMA模型残差诊断 ---\n")
+par(mfrow=c(2,2))
+checkresiduals(arma_model, main="ARMA模型残差诊断")
+
+```
+
+```{r}
+plot(arma_model $ residuals, xlab = "t", ylab = "residuals") #残差图像
+tsdiag(arma_model, gof.lag = 20) #残差的检验
+qqnorm(arma_model $ residuals,main="QQ Plot: Residuals of ARMA(2,1) Model") #残差的QQ图
+qqline(arma_model $ residuals)
+Box.test(arma_model $ residuals, type = "Ljung-Box") #残差的LB检验
+```
+
+```{r}
+# =======================================================
+# 1. ARMA 模型预测与绘图
+# =======================================================
+# 绘制未来 100 步的预测图 (带置信区间)
+plot(forecast(arma_model, 100), 
+     main = "ARMA Model Forecast (Next 100 Steps)",
+     ylab = "Log Returns", xlab = "Time")
+
+# 生成与测试集长度一致的预测数据
+arma_forecast <- forecast(arma_model, h=test_size)
+arma_pred <- as.numeric(arma_forecast$mean)
+
+# =======================================================
+# 2. 计算误差指标
+# =======================================================
+
+# --- A. 样本内误差 (In-Sample Metrics) ---
+# 从 arima 对象中直接提取 AIC 和 BIC
+aic_arma <- AIC(arma_model)
+bic_arma <- BIC(arma_model)
+
+# --- B. 样本外误差 (Out-of-Sample Metrics) ---
+# MSE (均方误差)
+mse_arma <- mean((test_data - arma_pred)^2)
+
+# RMSE (均方根误差)
+rmse_arma <- sqrt(mse_arma)
+
+# MAE (平均绝对误差)
+mae_arma <- mean(abs(test_data - arma_pred))
+
+# MAPE (平均绝对百分比误差)
+# 添加 eps 防止除以 0 (收益率数据常见问题)
+eps <- 1e-8
+mape_arma <- mean(abs((test_data - arma_pred) / (test_data + eps))) * 100
+
+# =======================================================
+# 3. 输出结果
+# =======================================================
+cat("\n============================================\n")
+cat("         ARMA 模型性能评估结果\n")
+cat("============================================\n")
+
+cat("--- 样本内误差 (模型拟合优度) ---\n")
+cat(sprintf("AIC (赤池信息准则):  %.4f\n", aic_arma))
+cat(sprintf("BIC (贝叶斯准则):    %.4f\n", bic_arma))
+
+cat("\n--- 样本外误差 (预测准确度) ---\n")
+cat(sprintf("MSE  (均方误差):     %.9f\n", mse_arma))
+cat(sprintf("RMSE (均方根误差):   %.9f\n", rmse_arma))
+cat(sprintf("MAE  (平均绝对误差): %.9f\n", mae_arma))
+cat(sprintf("MAPE (平均绝对百分比): %.2f%%\n", mape_arma))
+
+
+```
+
+# ARMA+GARCH
+
+残差分析
+
+```{r}
+library(FinTS)
+# ARCH效应与GARCH模型
+FinTS::ArchTest(residuals(arma_model))
+```
+
+模型的残差序列存在arch效应。考虑建立Garch模型,
+
+```{r}
+
+r_garch=garch(x=residuals(arma_model), order=c(1,1) ,reltol=0.000001)
+summary(r_garch)
+```
+
+所有系数均显著。Jarque Bera检验的结果表明Garch模型的残差是非正态的，而Box-Ljung检验的结果表明残差的平方是白噪声序列。
+
+```{r}
+plot(residuals(r_garch),type='h',ylab='standard residuals')
+acf(residuals(r_garch)^2,na.action=na.omit)
+
+gBox(r_garch,method='squared')
+# 4. 代替 gBox 进行检验 (Ljung-Box Test)
+# 对“平方标准化残差”做检验
+# p-value > 0.05 才算通过
+
+```
+
+模型的残差看起来很正常。
+
+残差平方序列看起来没有自相关性。
+
+Generalized Portmanteau Tests for GARCH Models也都未显著。
+
+1.  **残差非正态**：QQ图和 Jarque-Bera 检验都表明残差有厚尾（Heavy-tailed），不服从正态分布。
+
+2.  **存在 ARCH 效应**：ArchTest 拒绝原假设，说明方差不恒定，存在波动率聚集。
+
+3.  **模型选择**：在 ARMA 基础上建立 GARCH 模型是正确的方向。
+
+**但是， tseries::garch 函数有两个局限性**：
+
+1.  它是**分步估计**（先定 ARMA 算残差，再对残差算 GARCH），这在统计上不如**联合估计**（同时估计 ARMA 和 GARCH 参数）有效。
+
+2.  它默认假设**正态分布**，无法解决你发现的“厚尾”问题（QQ图两端偏离）。
+
+为了完善你的分析，建议使用 **rugarch 包** 来建立 **ARMA(2,1)-GARCH(1,1)** 模型（使用 Student-t 分布以适应厚尾），并进行预测和绘图。
+
+```{r}
+
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(2, 1), include.mean = TRUE),
+  distribution.model = "std"
+)
+
+# 2. 拟合模型 (使用训练集 train_data)
+# 注意：train_data 应该是你 PDF 第6页定义的差分后的训练数据
+garch_fit_final <- ugarchfit(spec = spec, data = train_data)
+
+# 3. 输出拟合结果
+print(garch_fit_final)
+
+```
+
+```{r}
+cat("\n--- Ljung-Box 检验 (标准化残差) ---\n")
+std_resid <- residuals(garch_fit, standardize = TRUE)
+
+# 对标准化残差做 Ljung-Box 检验 (看是否有未提取的均值信息)
+lb_mean <- Box.test(std_resid, lag = 20, type = "Ljung-Box")
+print(lb_mean)
+
+# 对标准化残差的平方做 Ljung-Box 检验 (看是否还有未提取的波动信息)
+lb_var <- Box.test(std_resid^2, lag = 20, type = "Ljung-Box")
+cat("\n--- Ljung-Box 检验 (标准化残差平方) ---\n")
+print(lb_var)
+
+```
+
+因此，对arma模型的残差建立Garch(1,1)模型进行拟合是合适的。
+
+基于Garch(1,1)画出条件方差图。
+
+```{r}
+plot((fitted(r_garch)[,1])^2,type='l',ylab='conditional variance',xlab='t')
+```
+
+上图显而易见，arma(2,1)的残差的方差确实会随时间变化（方差非齐），残差包含了标准普尔500指数方差集群信息，这对我们观察经济波动很有帮助。
+
+模型预测，画出预测图，对比训练集和测试集的预测精度
+
+```{r}
+
+
+# =======================================================
+# 1. 进行预测 (Forecasting)
+# =======================================================
+n_ahead <- length(test_data) 
+arma_garch_forecast <- ugarchforecast(garch_fit_final, n.ahead = n_ahead)
+
+# =======================================================
+# 2. 提取数据
+# =======================================================
+pred_mean <- as.numeric(fitted(arma_garch_forecast))
+pred_sigma <- as.numeric(sigma(arma_garch_forecast))
+
+# =======================================================
+# 3. 计算误差指标
+# =======================================================
+
+# --- A. 样本内误差 (In-Sample Metrics) ---
+# 提取信息准则矩阵
+info_mat <- infocriteria(garch_fit_final)
+
+# 提取 AIC (Akaike) - 通常在第 1 行
+aic_value <- info_mat[1]
+
+# 提取 BIC (Bayes) - 通常在第 2 行 (顺便提取，供参考)
+bic_value <- info_mat[2]
+
+# --- B. 样本外误差 (Out-of-Sample Metrics) ---
+# MSE (均方误差)
+mse_garch <- mean((test_data - pred_mean)^2)
+
+# RMSE (均方根误差)
+rmse_garch <- sqrt(mse_garch)
+
+# MAE (平均绝对误差)
+mae_garch <- mean(abs(test_data - pred_mean))
+
+# MAPE (平均绝对百分比误差)
+# 加上 eps 防止除以 0
+eps <- 1e-8 
+mape_garch <- mean(abs((test_data - pred_mean) / (test_data + eps))) * 100
+
+# =======================================================
+# 4. 输出结果
+# =======================================================
+cat("\n============================================\n")
+cat("      ARMA-GARCH 模型性能评估结果\n")
+cat("============================================\n")
+
+cat("--- 样本内误差 (模型拟合优度) ---\n")
+cat(sprintf("AIC (赤池信息准则):  %.4f\n", aic_value))
+cat(sprintf("BIC (贝叶斯准则):    %.4f\n", bic_value))
+
+cat("\n--- 样本外误差 (预测准确度) ---\n")
+cat(sprintf("MSE  (均方误差):     %.9f\n", mse_garch))
+cat(sprintf("RMSE (均方根误差):   %.9f\n", rmse_garch))
+cat(sprintf("MAE  (平均绝对误差): %.9f\n", mae_garch))
+cat(sprintf("MAPE (平均绝对百分比): %.2f%%\n", mape_garch))
+cat("--------------------------------------------\n")
+```
+
+```{r}
+library(rugarch)
+
+# =======================================================
+# 1. 生成未来 100 步的预测
+# =======================================================
+n_future <- 100
+# garch_fit_final 是你之前拟合好的对象
+fc_future <- ugarchforecast(garch_fit_final, n.ahead = n_future)
+
+# =======================================================
+# 2. 提取均值和波动率
+# =======================================================
+f_mu    <- as.numeric(fitted(fc_future)) # 预测的收益率均值
+f_sigma <- as.numeric(sigma(fc_future))  # 预测的波动率 (标准差)
+
+# =======================================================
+# 3. 计算符合 Student-t 分布的 95% 置信区间
+# =======================================================
+# 关键步骤：提取自由度 (shape)，因为你用了 std 分布
+# 如果你用的是正态分布 (norm)，shape 参数可能不存在，需要做个判断
+model_params <- coef(garch_fit_final)
+
+if("shape" %in% names(model_params)) {
+  # 如果是 Student-t 分布
+  df_shape <- model_params["shape"]
+  # 计算 t 分布的 0.975 分位点 (双尾 95%)
+  # rugarch 包提供了 qdist 函数方便计算
+  crit_val <- qdist(distribution = "std", p = 0.975, mu = 0, sigma = 1, shape = df_shape)
+  cat(sprintf("使用 Student-t 分布临界值: %.4f (自由度: %.2f)\n", crit_val, df_shape))
+} else {
+  # 如果是正态分布
+  crit_val <- 1.96
+  cat("使用正态分布临界值: 1.96\n")
+}
+
+# 计算上下界
+upper_bound <- f_mu + crit_val * f_sigma
+lower_bound <- f_mu - crit_val * f_sigma
+
+# =======================================================
+# 4. 准备绘图数据 (拼接历史尾部 + 未来预测)
+# =======================================================
+# 为了看清衔接，我们取历史数据的最后 50 个点
+last_n <- 50
+history_tail <- tail(as.numeric(train_data), last_n)
+
+# 构造绘图用的整体坐标
+# 时间轴：1 ~ (50 + 100)
+all_data_len <- last_n + n_future
+time_axis <- 1:all_data_len
+
+# 构造绘图数据向量，前面是历史，后面是 NA (留给预测填补)
+plot_history <- c(history_tail, rep(NA, n_future))
+
+# 构造预测向量，前面是 NA，后面是预测值
+plot_pred <- c(rep(NA, last_n), f_mu)
+# 为了线条连续，把预测的第一点设为历史的最后一点 (可选，视觉优化)
+plot_pred[last_n] <- history_tail[last_n] 
+
+# 构造置信区间向量 (前面NA，后面区间)
+plot_upper <- c(rep(NA, last_n), upper_bound)
+plot_lower <- c(rep(NA, last_n), lower_bound)
+# 视觉连续性处理
+plot_upper[last_n] <- history_tail[last_n]
+plot_lower[last_n] <- history_tail[last_n]
+
+# =======================================================
+# 5. 绘制精美图表
+# =======================================================
+# 确定 Y 轴范围，确保包含所有波动
+y_limits <- range(c(history_tail, upper_bound, lower_bound), na.rm = TRUE)
+
+# A. 绘制空白画布
+plot(time_axis, plot_history, type = "n", ylim = y_limits,
+     main = "ARMA-GARCH Forecast (Next 100 Steps)",
+     ylab = "Log Returns", xlab = "Time Steps (Last 50 History + 100 Future)")
+
+# B. 绘制置信区间 (阴影部分)
+# 只需要绘制后半部分
+future_x <- last_n:all_data_len
+polygon(c(future_x, rev(future_x)), 
+        c(plot_upper[future_x], rev(plot_lower[future_x])),
+        col = rgb(1, 0, 0, 0.15), border = NA) # 红色半透明
+
+# C. 绘制置信区间边缘线 (虚线)
+lines(plot_upper, col = "red", lty = 2, lwd = 1)
+lines(plot_lower, col = "red", lty = 2, lwd = 1)
+
+# D. 绘制历史数据 (黑色实线)
+lines(plot_history, col = "black", lwd = 1.5)
+
+# E. 绘制预测均值 (蓝色实线)
+lines(plot_pred, col = "blue", lwd = 2)
+
+# F. 添加分界线
+abline(v = last_n, col = "gray", lty = 3)
+text(last_n, max(y_limits), "Forecast Start", pos = 4, cex = 0.8, col="gray")
+
+# G. 图例
+legend("topleft", 
+       legend = c("History", "Forecast Mean", "95% Dynamic CI"),
+       col = c("black", "blue", "red"), 
+       lty = c(1, 1, 2), 
+       lwd = c(1.5, 2, 1), 
+       fill = c(NA, NA, rgb(1, 0, 0, 0.15)), border = NA)
+```
+
+```{r}
+# 2. 绘图：预测值 vs 真实值
+# 为了看清细节，我们只画最后 100 个点，或者画整个测试集
+library(ggplot2)
+
+# 创建绘图数据框
+plot_df <- data.frame(
+  Time = 1:length(test_data),
+  Actual = as.numeric(test_data),
+  Predicted = pred_mean,
+  Upper = pred_mean + 2 * pred_sigma, # 95% 置信区间上限 (考虑了波动率变化)
+  Lower = pred_mean - 2 * pred_sigma  # 95% 置信区间下限
+)
+
+# 绘制预测对比图 (带置信区间)
+ggplot(plot_df, aes(x = Time)) +
+  geom_line(aes(y = Actual), color = "black", alpha = 0.5, size = 0.5) + # 真实值
+  geom_line(aes(y = Predicted), color = "red", size = 0.8) +             # 预测均值
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "red", alpha = 0.2) + # 动态置信区间
+  labs(title = "ARMA-GARCH Model Forecast vs Actual",
+       subtitle = "Red Line: Forecast, Grey Area: 95% Confidence Interval (Dynamic Volatility)",
+       y = "Log Returns (Diff)", x = "Time (Test Set Index)") +
+  theme_minimal()
+
+# 3. 解释图形
+# GARCH 模型的优势在于它能预测“风险”。
+# 你会发现红色的置信区间带（Confidence Interval）不是等宽的，
+# 而是随着市场波动而忽大忽小，这正是 GARCH 模型捕捉到了方差聚类效应的表现。
+```
+
+#### 2. 结果分析与合理性判断
+
+-   **模型修正的必要性**：最初的 ARMA 模型虽然消除了序列的自相关性（Ljung-Box Test 通过），但无法解释方差的波动（ARCH Test 拒绝）。引入 GARCH 模型后，能够解释波动率聚集现象。
+
+-   **误差分析**：
+
+    -   在 **MSE/MAE (均值预测)** 上，ARMA-GARCH 可能与纯 ARMA 差别不大，甚至略高一点点。这是正常的！因为 GARCH 主要改善的是**方差预测（风险评估）**，而不是均值预测。
+
+    -   **AIC (赤池信息准则)**：联合估计的 ARMA-GARCH 模型的 AIC 通常会比单跑 ARMA 的 AIC 更低（即更好），说明在考虑了波动率后，模型对数据的整体拟合度更高。
+
+-   **预测图**：ARMA-GARCH 的预测图不仅给出了点预测，还给出了随时间变化的置信区间，这对于金融风险管理（如计算 VaR）比单纯的点预测更有价值。
+
+#### 结论
+
+经过一系列检验与修正，**ARMA(2,1)-GARCH(1,1) (with Student-t distribution)** 是描述该 S&P 500 收益率序列的最优模型。残差检验显示其已为白噪声，且模型成功捕捉了厚尾和波动聚集特征。
+
+```{r}
+library(ggplot2)
+
+cat("\n=== 简单交易策略回测 ===\n")
+
+# 策略逻辑: 
+# 如果模型预测均值 > 0，则做多 (持仓)
+# 如果模型预测均值 < 0，则做空 (或空仓，这里假设做空)
+signals <- ifelse(pred_mean > 0, 1, -1)
+
+# 计算策略收益 = 信号 * 真实收益
+# (假设第二天以开盘价买入，收盘价卖出，这里简化为直接获得当天收益)
+strategy_returns <- signals * test_data
+bh_returns <- test_data # Buy and Hold (买入持有) 策略
+
+# 计算累计收益曲线
+cumulative_strategy <- cumprod(1 + strategy_returns)
+cumulative_bh <- cumprod(1 + bh_returns)
+
+# 绘图数据准备
+backtest_df <- data.frame(
+  Time = 1:length(test_data),
+  Strategy = cumulative_strategy,
+  BuyHold = cumulative_bh
+)
+
+# 绘制累计收益对比图
+ggplot(backtest_df, aes(x = Time)) +
+  geom_line(aes(y = Strategy, color = "ARMA-GARCH Strategy"), size = 1) +
+  geom_line(aes(y = BuyHold, color = "Buy & Hold (S&P 500)"), size = 0.8, linetype = "dashed") +
+  labs(title = "Trading Strategy Backtest",
+       subtitle = "Cumulative Returns: Model vs Market",
+       y = "Cumulative Return (1.0 = Start)",
+       color = "Strategy") +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+```{r}
+cat("\n=== Value at Risk (VaR) 验证 ===\n")
+
+# 提取模型预测的 Sigma (波动率)
+# pred_sigma 来自 PDF 之前的代码
+# 提取 Student-t 分布的形状参数 (shape parameter)
+dist_shape <- coef(garch_fit_final)["shape"]
+
+# 计算 5% 的分位数 (对于 Student-t 分布)
+# qdist 是 rugarch 包里的函数，用于获取标准化残差的分位数
+t_quantile <- qdist("std", p = 0.05, shape = dist_shape, mu = 0, sigma = 1)
+
+# 计算动态 VaR (95% 置信度)
+# VaR_5% = 预测均值 + 预测波动率 * t分布的5%分位点
+# 注意: t_quantile 通常是负数 (例如 -1.65 或更低)
+VaR_95 <- pred_mean + pred_sigma * t_quantile
+
+# 统计“爆仓”次数 (实际收益率低于 VaR 的次数)
+exceedances <- sum(test_data < VaR_95)
+total_days <- length(test_data)
+actual_ratio <- exceedances / total_days
+
+cat(sprintf("测试集总天数: %d\n", total_days))
+cat(sprintf("实际跌破 VaR 阈值次数: %d\n", exceedances))
+cat(sprintf("实际违约率 (Failure Rate): %.4f (理论应接近 0.05)\n", actual_ratio))
+
+# Kupiec 检验 (简单的概念性判断)
+if (actual_ratio > 0.04 && actual_ratio < 0.06) {
+  cat("结论: 模型对风险的估计非常准确 (在 4%-6% 之间)。\n")
+} else if (actual_ratio >= 0.06) {
+  cat("结论: 模型低估了风险 (实际跌破次数过多)。\n")
+} else {
+  cat("结论: 模型高估了风险 (实际跌破次数过少，模型过于保守)。\n")
+}
+
+# 绘图展示 VaR 穿透
+plot(test_data, type = "l", col = "gray", main = "VaR Backtesting (Red Line = 95% VaR)", ylab = "Returns")
+lines(VaR_95, col = "red", lwd = 2)
+# 标记穿透点
+points(which(test_data < VaR_95), test_data[test_data < VaR_95], col = "blue", pch = 20)
+legend("bottomleft", legend = c("Actual Returns", "95% VaR", "Exceedance"), 
+       col = c("gray", "red", "blue"), lty = c(1, 1, NA), pch = c(NA, NA, 20))
+```
+
+# PLOT
+
+```{r}
+library(forecast)
+library(ggplot2)
+
+# ==========================================
+# 1. 准备数据
+# ==========================================
+# 确保你有 test_data (测试集) 和之前的模型对象
+# ar_model: 你之前拟合的 AR(4)
+# arma_model: 你之前拟合的 ARMA(2,1)
+
+# 预测步长 (等于测试集长度)
+n_ahead <- length(test_data)
+
+# ==========================================
+# 2. AR 模型预测与绘图
+# ==========================================
+# 进行预测
+ar_fc <- forecast(ar_model, h = n_ahead)
+
+# 转换为绘图数据
+df_ar <- data.frame(
+  Time = 1:n_ahead,
+  Actual = as.numeric(test_data),
+  Predicted = as.numeric(ar_fc$mean),
+  Lower = as.numeric(ar_fc$lower[,2]), # 95% 置信区间下限
+  Upper = as.numeric(ar_fc$upper[,2])  # 95% 置信区间上限
+)
+
+# 绘制 AR 模型预测图 (只显示前 200 个点以看清细节，如果想看全部请去掉 [1:200,])
+subset_n <- min(200, n_ahead) 
+
+p1 <- ggplot(df_ar[1:subset_n, ], aes(x = Time)) +
+  geom_line(aes(y = Actual, color = "Actual"), alpha = 0.6) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "blue", alpha = 0.1) +
+  scale_color_manual(values = c("Actual" = "black", "Predicted" = "blue")) +
+  labs(title = "AR Model Forecast vs Actual (First 200 points)",
+       y = "Returns", x = "Time") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+print(p1)
+
+# ==========================================
+# 3. ARMA 模型预测与绘图
+# ==========================================
+# 进行预测
+arma_fc <- forecast(arma_model, h = n_ahead)
+
+# 转换为绘图数据
+df_arma <- data.frame(
+  Time = 1:n_ahead,
+  Actual = as.numeric(test_data),
+  Predicted = as.numeric(arma_fc$mean),
+  Lower = as.numeric(arma_fc$lower[,2]),
+  Upper = as.numeric(arma_fc$upper[,2])
+)
+
+# 绘制 ARMA 模型预测图
+p2 <- ggplot(df_arma[1:subset_n, ], aes(x = Time)) +
+  geom_line(aes(y = Actual, color = "Actual"), alpha = 0.6) +
+  geom_line(aes(y = Predicted, color = "Predicted"), size = 1) +
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "darkgreen", alpha = 0.1) +
+  scale_color_manual(values = c("Actual" = "black", "Predicted" = "darkgreen")) +
+  labs(title = "ARMA Model Forecast vs Actual (First 200 points)",
+       y = "Returns", x = "Time") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+print(p2)
+
+# ==========================================
+# 4. (可选) 把两个模型画在一起对比
+# ==========================================
+# 这种图能让你看清两个模型的预测值差异是否微小
+p3 <- ggplot(df_arma[1:subset_n, ], aes(x = Time)) +
+  #geom_line(aes(y = Actual, color = "Actual"), alpha = 0.4) +
+  geom_line(aes(y = df_ar$Predicted[1:subset_n], color = "AR Forecast"), linetype="dashed") +
+  geom_line(aes(y = Predicted, color = "ARMA Forecast"), linetype="solid") +
+  scale_color_manual(values = c("Actual" = "black", "AR Forecast" = "blue", "ARMA Forecast" = "darkgreen")) +
+  labs(title = "Model Comparison: AR vs ARMA",
+       subtitle = "Notice that both linear models tend to predict the mean (near zero)",
+       y = "Returns", x = "Time") +
+  theme_minimal()
+
+print(p3)
+```
+
+## 整个预测图
+
+```{r}
+# ==========================================
+# 步骤 1: 准备全量预测数据 (修复 $ 报错)
+# ==========================================
+n_ahead <- length(test_data) # 获取测试集总长度
+
+# --- 1. AR(4) 全量预测 ---
+# 重新运行预测以确保对象结构正确
+ar_obj_full <- predict(ar_model, n.ahead = n_ahead)
+# 提取均值和标准误 (转为纯数字向量)
+ar_mean <- as.numeric(ar_obj_full$pred)
+ar_se   <- as.numeric(ar_obj_full$se)
+
+# --- 2. ARMA(2,1) 全量预测 ---
+arma_obj_full <- predict(arma_model, n.ahead = n_ahead)
+arma_mean <- as.numeric(arma_obj_full$pred)
+arma_se   <- as.numeric(arma_obj_full$se)
+
+# --- 3. AR-GARCH 全量预测 ---
+# 提取拟合值(均值)和条件标准差(波动率)
+# 注意：这里假设您的GARCH预测对象名叫 ar_garch_forecast
+arg_mean  <- as.numeric(fitted(ar_garch_forecast))
+arg_sigma <- as.numeric(sigma(ar_garch_forecast))
+
+# --- 4. ARMA-GARCH 全量预测 ---
+armag_mean  <- as.numeric(fitted(arma_garch_forecast))
+armag_sigma <- as.numeric(sigma(arma_garch_forecast))
+
+# ==========================================
+# 步骤 2: 绘制四图合一 (全时段)
+# ==========================================
+# 设置 2x2 画布
+#par(mfrow = c(2, 2))
+#par(mar = c(3, 4, 3, 1)) # 调整边距: 下 左 上 右
+
+# 统一的时间轴
+x_axis <- 1:n_ahead
+
+# ------------ 图1: AR(4) ------------
+# 动态计算Y轴范围，保证线条不溢出
+ylim_1 <- range(c(test_data, ar_mean + 2*ar_se, ar_mean - 2*ar_se))
+
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_1,
+     main = "AR(4) Model (Full Test Set)", ylab = "Log Returns", xlab = "")
+# 添加 95% 静态区间 (AR的方差最后会趋于常数，几乎是平行的)
+lines(x_axis, ar_mean + 2*ar_se, col = "blue", lty = 2, lwd = 1)
+lines(x_axis, ar_mean - 2*ar_se, col = "blue", lty = 2, lwd = 1)
+# 添加预测均值 (红色)
+lines(x_axis, ar_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Static 95% CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# ------------ 图2: ARMA(2,1) ------------
+ylim_2 <- range(c(test_data, arma_mean + 2*arma_se, arma_mean - 2*arma_se))
+
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_2,
+     main = "ARMA(2,1) Model (Full Test Set)", ylab = "Log Returns", xlab = "")
+lines(x_axis, arma_mean + 2*arma_se, col = "blue", lty = 2, lwd = 1)
+lines(x_axis, arma_mean - 2*arma_se, col = "blue", lty = 2, lwd = 1)
+lines(x_axis, arma_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Static 95% CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# ------------ 图3: AR-GARCH ------------
+ylim_3 <- range(c(test_data, arg_mean + 2*arg_sigma, arg_mean - 2*arg_sigma))
+
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_3,
+     main = "AR-GARCH (Full Test Set)", ylab = "Log Returns", xlab = "")
+# 添加动态区间 (随波动率收缩/膨胀)
+lines(x_axis, arg_mean + 2*arg_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, arg_mean - 2*arg_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, arg_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Dynamic GARCH CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# ------------ 图4: ARMA-GARCH ------------
+ylim_4 <- range(c(test_data, armag_mean + 2*armag_sigma, armag_mean - 2*armag_sigma))
+
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_4,
+     main = "ARMA-GARCH (Full Test Set)", ylab = "Log Returns", xlab = "")
+lines(x_axis, armag_mean + 2*armag_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, armag_mean - 2*armag_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, armag_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Dynamic GARCH CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# 恢复默认画布设置
+par(mfrow = c(1, 1))
+```
+
+## 后200天的预测图
+
+```{r}
+# ==========================================
+# 步骤 1: 重新生成预测对象 (确保结构正确)
+# ==========================================
+# 获取测试集长度
+n_ahead_steps <- length(test_data)
+
+# 1. AR 模型预测 (这里生成的是一个列表，包含 pred 和 se)
+ar_forecast_obj <- predict(ar_model, n.ahead = n_ahead_steps)
+# 提取数据
+ar_mean_full <- as.numeric(ar_forecast_obj$pred) # 均值
+ar_se_full   <- as.numeric(ar_forecast_obj$se)   # 标准误
+
+# 2. ARMA 模型预测
+arma_forecast_obj <- predict(arma_model, n.ahead = n_ahead_steps)
+# 提取数据
+arma_mean_full <- as.numeric(arma_forecast_obj$pred)
+arma_se_full   <- as.numeric(arma_forecast_obj$se)
+
+# 3. GARCH 模型预测 (AR-GARCH 和 ARMA-GARCH)
+# 注意：你需要确保内存里有拟合好的 fit 对象 (fit_ar_garch, fit_arma_garch)
+# 或者已经是 forecast 对象
+arg_mean_full  <- as.numeric(fitted(ar_garch_forecast))
+arg_sigma_full <- as.numeric(sigma(ar_garch_forecast))
+
+armag_mean_full  <- as.numeric(fitted(arma_garch_forecast))
+armag_sigma_full <- as.numeric(sigma(arma_garch_forecast))
+
+# ==========================================
+# 步骤 2: 数据切片 (只取最后 200 个点)
+# ==========================================
+subset_n <- 200
+total_len <- n_ahead_steps
+# 计算最后 200 个点的索引位置
+idx <- (total_len - subset_n + 1):total_len
+
+# 提取测试集真值 (切片)
+y_real_subset <- as.numeric(test_data[idx])
+
+# 提取各模型预测值 (切片)
+ar_mean_sub   <- ar_mean_full[idx]
+ar_se_sub     <- ar_se_full[idx]
+
+arma_mean_sub <- arma_mean_full[idx]
+arma_se_sub   <- arma_se_full[idx]
+
+arg_mean_sub   <- arg_mean_full[idx]
+arg_sigma_sub  <- arg_sigma_full[idx]
+
+armag_mean_sub   <- armag_mean_full[idx]
+armag_sigma_sub  <- armag_sigma_full[idx]
+
+# ==========================================
+# 步骤 3: 绘图 (2行2列)
+# ==========================================
+#par(mfrow = c(2, 2))      # 设置2x2画布
+#par(mar = c(3, 4, 3, 1))  # 设置边距 (下, 左, 上, 右)
+
+# --- 图1: AR(4) ---
+# 计算Y轴范围以包容所有线
+ylim_1 <- range(c(y_real_subset, ar_mean_sub + 2*ar_se_sub, ar_mean_sub - 2*ar_se_sub))
+
+plot(idx, y_real_subset, type = "l", col = "gray40", lwd = 1.2, ylim = ylim_1,
+     main = "AR(4) [Static Variance]", ylab = "Log Returns", xlab = "")
+# 95% 静态置信区间 (几乎平行)
+lines(idx, ar_mean_sub + 2*ar_se_sub, col = "blue", lty = 2)
+lines(idx, ar_mean_sub - 2*ar_se_sub, col = "blue", lty = 2)
+# 预测均值
+lines(idx, ar_mean_sub, col = "red", lwd = 1.5)
+legend("topleft", c("Actual", "Pred", "95% CI"), col=c("gray40", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# --- 图2: ARMA(2,1) ---
+ylim_2 <- range(c(y_real_subset, arma_mean_sub + 2*arma_se_sub, arma_mean_sub - 2*arma_se_sub))
+
+plot(idx, y_real_subset, type = "l", col = "gray40", lwd = 1.2, ylim = ylim_2,
+     main = "ARMA(2,1) [Static Variance]", ylab = "Log Returns", xlab = "")
+lines(idx, arma_mean_sub + 2*arma_se_sub, col = "blue", lty = 2)
+lines(idx, arma_mean_sub - 2*arma_se_sub, col = "blue", lty = 2)
+lines(idx, arma_mean_sub, col = "red", lwd = 1.5)
+legend("topleft", c("Actual", "Pred", "95% CI"), col=c("gray40", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# --- 图3: AR-GARCH ---
+ylim_3 <- range(c(y_real_subset, arg_mean_sub + 2*arg_sigma_sub, arg_mean_sub - 2*arg_sigma_sub))
+
+plot(idx, y_real_subset, type = "l", col = "gray40", lwd = 1.2, ylim = ylim_3,
+     main = "AR-GARCH [Dynamic Variance]", ylab = "Log Returns", xlab = "")
+# 95% 动态置信区间 (随波动变化)
+lines(idx, arg_mean_sub + 2*arg_sigma_sub, col = "blue", lty = 2)
+lines(idx, arg_mean_sub - 2*arg_sigma_sub, col = "blue", lty = 2)
+lines(idx, arg_mean_sub, col = "red", lwd = 1.5)
+legend("topleft", c("Actual", "Pred", "Dynamic CI"), col=c("gray40", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# --- 图4: ARMA-GARCH ---
+ylim_4 <- range(c(y_real_subset, armag_mean_sub + 2*armag_sigma_sub, armag_mean_sub - 2*armag_sigma_sub))
+
+plot(idx, y_real_subset, type = "l", col = "gray40", lwd = 1.2, ylim = ylim_4,
+     main = "ARMA-GARCH [Dynamic Variance]", ylab = "Log Returns", xlab = "")
+lines(idx, armag_mean_sub + 2*armag_sigma_sub, col = "blue", lty = 2)
+lines(idx, armag_mean_sub - 2*armag_sigma_sub, col = "blue", lty = 2)
+lines(idx, armag_mean_sub, col = "red", lwd = 1.5)
+legend("topleft", c("Actual", "Pred", "Dynamic CI"), col=c("gray40", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+# 恢复默认设置
+par(mfrow = c(1, 1))
+```

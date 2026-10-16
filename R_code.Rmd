@@ -1,0 +1,181 @@
+---
+output:
+  html_document: default
+  pdf_document: default
+---
+```{r}
+# Load package
+library(quantmod)
+library(tseries)
+library(fUnitRoots)
+library(forecast)
+library(Metrics)
+library(FinTS)
+library(TSA)
+library(rugarch)
+
+# Load data
+data=read.table("d-sp58010.txt",header=T)
+data_ts <- ts(data$Close)
+log_data <- log(data_ts)
+diff_data <- diff(log_data) # Log return
+
+# ADF Test
+fUnitRoots::adfTest(data_ts)
+fUnitRoots::adfTest(log_data)
+fUnitRoots::adfTest(diff_data)
+
+# Split data
+n <- length(diff_data)
+train_size <- floor(0.8 * n)
+test_size <- n - train_size
+train_data <- diff_data[1:train_size]
+test_data <- diff_data[(train_size+1):n]
+
+# 1.AR Model
+ar_order <- ar(train_data, method="mle")
+ar_model <- arima(train_data, order=c(ar_order$order, 0, 0), include.mean=TRUE)
+coefs <- ar_model$coef # Parameter Estimates of AR Model
+se <- sqrt(diag(ar_model$var.coef))
+t_values <- coefs / se 
+p_values <- 2 * (1 - pnorm(abs(t_values))) 
+result <- data.frame(
+  Estimate = coefs,
+  StdError = se,
+  t_value = t_values,
+  p_value = p_values)
+print(result)
+checkresiduals(ar_model) # Residual diagnosis
+
+# 2.AR-GARCH Model
+FinTS::ArchTest(residuals(ar_model)) # ARCH effect test
+
+spec_ar <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(4, 0), include.mean = TRUE),
+  distribution.model = "std"
+)
+fit_ar_garch <- ugarchfit(spec = spec_ar, data = train_data, solver = 'hybrid') # Fit
+print(fit_ar_garch)
+n_ahead <- length(test_data) # Forecast
+ar_garch_forecast <- ugarchforecast(fit_ar_garch, n.ahead = n_ahead)
+pred_mean_ar_garch <- as.numeric(fitted(ar_garch_forecast))
+pred_sigma_ar_garch <- as.numeric(sigma(ar_garch_forecast))
+
+# 3.ARMA Model
+arma_model <- auto.arima(train_data, max.p=10, start.p=10,
+                         max.q=10, start.q=0,
+                         ic="aic", seasonal= FALSE,
+                        trace=TRUE,stepwise=TRUE,approximation = FALSE)
+coefs <- arma_model$coef # Parameter Estimates of AR Model
+se <- sqrt(diag(arma_model$var.coef))
+t_values <- coefs / se # 
+p_values <- 2 * (1 - pnorm(abs(t_values))) 
+result <- data.frame(
+  Estimate = coefs,
+  StdError = se,
+  t_value = t_values,
+  p_value = p_values)
+print(result)
+checkresiduals(arma_model) # Residual diagnosis
+
+# 4.ARMA-GARCH Model
+FinTS::ArchTest(residuals(arma_model)) # ARCH effect test
+
+spec <- ugarchspec(
+  variance.model = list(model = "sGARCH", garchOrder = c(1, 1)),
+  mean.model = list(armaOrder = c(2, 1), include.mean = TRUE),
+  distribution.model = "std"
+)
+garch_fit_final <- ugarchfit(spec = spec, data = train_data) # Fit
+print(garch_fit_final)
+n_ahead <- length(test_data)  # Forecast
+arma_garch_forecast <- ugarchforecast(garch_fit_final, n.ahead = n_ahead)
+pred_mean <- as.numeric(fitted(arma_garch_forecast))
+pred_sigma <- as.numeric(sigma(arma_garch_forecast))
+
+
+# Forecast Performance Metrics
+# (1) AR
+aic_ar <- AIC(ar_model)
+mse_ar <- mean((test_data - ar_pred)^2)
+rmse_ar <- sqrt(mse_ar)
+mae_ar <- mean(abs(test_data - ar_pred))
+# (2) AR-GARCH
+info_mat <- infocriteria(fit_ar_garch)
+aic_ar_garch <- info_mat[1] 
+mse_ar_garch <- mean((test_data - pred_mean_ar_garch)^2)
+rmse_ar_garch <- sqrt(mse_ar_garch)
+mae_ar_garch <- mean(abs(test_data - pred_mean_ar_garch))
+# (3) ARMA
+aic_arma <- AIC(arma_model)
+mse_arma <- mean((test_data - arma_pred)^2)
+rmse_arma <- sqrt(mse_arma)
+mae_arma <- mean(abs(test_data - arma_pred))
+# (4) ARMA-GARCH
+info_mat <- infocriteria(garch_fit_final)
+aic_value <- info_mat[1]
+mse_garch <- mean((test_data - pred_mean)^2)
+rmse_garch <- sqrt(mse_garch)
+mae_garch <- mean(abs(test_data - pred_mean))
+
+# Plot 1
+par(mfrow=c(1,2))
+plot(data_ts, main="Time Series Diagram: Raw Data", ylab="Closing Price", xlab="Time",
+     col="blue", lwd=2)
+plot(log_data, main="Time Series Diagram: After Log Transformation", ylab="ln(Closing Price)", xlab="Time",
+     col="darkgreen", lwd=2)
+# Plot 2
+acf(data_ts, main="ACF: Raw Data", lag.max=20)
+acf(log_data, main="ACF: After Log Transformation", lag.max=20)
+# Plot 3 & 4
+tsdisplay(diff_data, main="Log Return")
+acf(diff_data, main="ACF: Log Return", lag.max=20)
+pacf(diff_data, main="PACF: Log Return", lag.max=20)
+# Plot 5
+qqnorm(ar_model $ residuals,main="QQ Plot: Residuals of AR(4) Model") #QQ plot of AR residual
+qqline(ar_model $ residuals)
+# Plot 6
+x_axis <- 1:n_ahead
+ylim_1 <- range(c(test_data, ar_mean + 2*ar_se, ar_mean - 2*ar_se))
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_1,
+     main = "AR(4) Model (Full Test Set)", ylab = "Log Returns", xlab = "")
+lines(x_axis, ar_mean + 2*ar_se, col = "blue", lty = 2, lwd = 1)
+lines(x_axis, ar_mean - 2*ar_se, col = "blue", lty = 2, lwd = 1)
+lines(x_axis, ar_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Static 95% CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+# Plot 7
+ylim_2 <- range(c(test_data, arg_mean + 2*arg_sigma, arg_mean - 2*arg_sigma))
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_2,
+     main = "AR-GARCH (Full Test Set)", ylab = "Log Returns", xlab = "")
+lines(x_axis, arg_mean + 2*arg_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, arg_mean - 2*arg_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, arg_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Dynamic GARCH CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+# Plot 8
+qqnorm(arma_model $ residuals,main="QQ Plot: Residuals of ARMA(2,1) Model") #残差的QQ图
+qqline(arma_model $ residuals)
+# Plot 9
+ylim_3 <- range(c(test_data, arma_mean + 2*arma_se, arma_mean - 2*arma_se))
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_3,
+     main = "ARMA(2,1) Model (Full Test Set)", ylab = "Log Returns", xlab = "")
+lines(x_axis, arma_mean + 2*arma_se, col = "blue", lty = 2, lwd = 1)
+lines(x_axis, arma_mean - 2*arma_se, col = "blue", lty = 2, lwd = 1)
+lines(x_axis, arma_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Static 95% CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+# Plot 10
+ylim_4 <- range(c(test_data, armag_mean + 2*armag_sigma, armag_mean - 2*armag_sigma))
+plot(x_axis, as.numeric(test_data), type = "l", col = "gray70", lwd = 0.8, ylim = ylim_4,
+     main = "ARMA-GARCH (Full Test Set)", ylab = "Log Returns", xlab = "")
+lines(x_axis, armag_mean + 2*armag_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, armag_mean - 2*armag_sigma, col = "blue", lty = 2, lwd = 0.8)
+lines(x_axis, armag_mean, col = "red", lwd = 1.2)
+legend("topleft", c("Actual", "Mean Forecast", "Dynamic GARCH CI"), 
+       col=c("gray70", "red", "blue"), lty=c(1,1,2), cex=0.7, bty="n")
+
+
+```
+
